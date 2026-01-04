@@ -1,0 +1,144 @@
+EKS + Fargate
+
+EKS takes care of control plane
+Fargate takes care of data plane
+
+0-- Pre-requisites
+Install aws cli
+Install kubectl
+install eksctl
+Install Helm
+
+1-- Create EKS cluster
+eksctl create cluster --name eks2048cluster --region us-east-1 --fargate
+
+2-- Now update kubeconfig 
+aws eks update-kubeconfig --name eks2048cluster
+
+3--Try below commands
+kubectl get nodes
+kubectl get namespaces
+kubectl get pods
+
+4-- Create Fargate profile (You can deploy the app in default namespace also, but just to cover something more we can create like below and deploy in other namespace)
+eksctl create fargateprofile \
+    --cluster eks2048cluster \
+    --region us-east-1 \
+    --name fp-alb-2048 \
+    --namespace game-2048
+	
+5-- Deploy the deployment, service and Ingress
+kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.5.4/docs/examples/2048/2048_full.yaml
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: game-2048
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: game-2048
+  name: deployment-2048
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: app-2048
+  replicas: 5
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: app-2048
+    spec:
+      containers:
+      - image: public.ecr.aws/l6m2t8p7/docker-2048:latest
+        imagePullPolicy: Always
+        name: app-2048
+        ports:
+        - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  namespace: game-2048
+  name: service-2048
+spec:
+  ports:
+    - port: 80
+      targetPort: 80
+      protocol: TCP
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: app-2048
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  namespace: game-2048
+  name: ingress-2048
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+        - path: /
+          pathType: Prefix
+          backend:
+            service:
+              name: service-2048
+              port:
+                number: 80
+				
+				
+6-- Try below commands to check 
+kubectl get pods -n game-2048
+kubectl get nodes
+kubectl get nodes -n game-2048
+kubectl get svc -n game-2048
+kubectl get ingress -n game-2048
+
+7-- Check if there is an IAM OIDC provider configured already
+aws iam list-open-id-connect-providers
+
+8-- Configure IAM OIDC provider
+eksctl utils associate-iam-oidc-provider --cluster eks2048cluster --approve
+
+9-- Download or create ALB Ingress Controller IAM Policy
+curl -o iam_policy.json \
+https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/docs/install/iam_policy.json
+
+10-- Create IAM Policy
+aws iam create-policy \
+  --policy-name ALBIngressControllerIAMPolicy \
+  --policy-document file://iam_policy.json
+
+11-- Create service account to attach role
+eksctl create iamserviceaccount \
+  --cluster=eks2048cluster \
+  --namespace=kube-system \
+  --name=aws-load-balancer-controller \
+  --role-name AmazonEKSLoadBalancerControllerRole \
+  --attach-policy-arn=arn:aws:iam::570367131375:policy/ALBIngressControllerIAMPolicy \
+  --approve
+
+12-- Install aws-load-balancer-controller
+helm repo add eks https://aws.github.io/eks-charts
+
+helm repo update
+
+helm install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system \
+  --set clusterName=eks2048cluster \
+  --set serviceAccount.create=false \
+  --set serviceAccount.name=aws-load-balancer-controller \
+  --set region=us-east-1 \
+  --set vpcId=vpc-0c5012b90eceb6bda
+  
+kubectl get deployment aws-load-balancer-controller -n kube-system
+kubectl get ingress -n game-2048
+
+13-- Delete the cluster
+eksctl delete cluster --name eks2048cluster --region us-east-1
